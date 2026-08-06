@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/db";
+import { getDb } from "@/db";
 import { clips, clipTags, tags } from "@/db/schema";
 import { eq, desc, ilike, or, sql, and, gte, inArray } from "drizzle-orm";
 
 export async function GET(req: NextRequest) {
   try {
+    const db = getDb();
     const url = req.nextUrl;
     const q = url.searchParams.get("q") || "";
     const collectionId = url.searchParams.get("collection_id");
@@ -20,94 +21,68 @@ export async function GET(req: NextRequest) {
     const offset = parseInt(url.searchParams.get("offset") || "0");
 
     const conditions = [];
-
     if (q) {
-      conditions.push(
-        or(
-          ilike(clips.customTitle, `%${q}%`),
-          ilike(clips.note, `%${q}%`),
-          ilike(clips.creatorHandle, `%${q}%`),
-          ilike(clips.creatorName, `%${q}%`)
-        )
-      );
+      conditions.push(or(
+        ilike(clips.customTitle, `%${q}%`),
+        ilike(clips.note, `%${q}%`),
+        ilike(clips.creatorHandle, `%${q}%`),
+        ilike(clips.creatorName, `%${q}%`)
+      ));
     }
-    if (collectionId && !isNaN(parseInt(collectionId))) {
+    if (collectionId && !isNaN(parseInt(collectionId)))
       conditions.push(eq(clips.collectionId, parseInt(collectionId)));
-    }
     if (saveReason) conditions.push(eq(clips.saveReason, saveReason));
     if (watchStatus) conditions.push(eq(clips.watchStatus, watchStatus));
     if (pinnedOnly) conditions.push(eq(clips.isPinned, true));
     if (dateFrom) conditions.push(gte(clips.savedAt, new Date(dateFrom)));
     if (dateTo) {
-      const to = new Date(dateTo);
-      to.setDate(to.getDate() + 1);
+      const to = new Date(dateTo); to.setDate(to.getDate() + 1);
       conditions.push(sql`${clips.savedAt} < ${to}`);
     }
     if (creatorFilter) {
-      conditions.push(
-        or(
-          ilike(clips.creatorHandle, `%${creatorFilter}%`),
-          ilike(clips.creatorName, `%${creatorFilter}%`)
-        )
-      );
+      conditions.push(or(
+        ilike(clips.creatorHandle, `%${creatorFilter}%`),
+        ilike(clips.creatorName, `%${creatorFilter}%`)
+      ));
     }
     if (tagFilter) {
-      const tagRows = await db
-        .select({ clipId: clipTags.clipId })
-        .from(clipTags)
-        .innerJoin(tags, eq(tags.id, clipTags.tagId))
-        .where(ilike(tags.name, `%${tagFilter}%`));
-      const ids = tagRows.map((r) => r.clipId);
+      const tagRows = await db.select({ clipId: clipTags.clipId }).from(clipTags)
+        .innerJoin(tags, eq(tags.id, clipTags.tagId)).where(ilike(tags.name, `%${tagFilter}%`));
+      const ids = tagRows.map((r: { clipId: number }) => r.clipId);
       if (ids.length === 0) return NextResponse.json({ clips: [], total: 0 });
       conditions.push(inArray(clips.id, ids));
     }
 
     const where = conditions.length > 0 ? and(...conditions) : undefined;
-    const order =
-      sortBy === "open_count"
-        ? desc(clips.openCount)
-        : sortBy === "last_opened"
-          ? desc(clips.lastOpenedAt)
-          : desc(clips.savedAt);
+    const order = sortBy === "open_count" ? desc(clips.openCount)
+      : sortBy === "last_opened" ? desc(clips.lastOpenedAt) : desc(clips.savedAt);
 
     const [result, countResult] = await Promise.all([
       db.select().from(clips).where(where).orderBy(desc(clips.isPinned), order).limit(limit).offset(offset),
       db.select({ count: sql<number>`count(*)::int` }).from(clips).where(where),
     ]);
 
-    const clipIds = result.map((c) => c.id);
+    const clipIds = result.map((c: { id: number }) => c.id);
     const map: Record<number, string[]> = {};
     if (clipIds.length > 0) {
-      const rows = await db
-        .select({ clipId: clipTags.clipId, tagName: tags.name })
-        .from(clipTags)
-        .innerJoin(tags, eq(tags.id, clipTags.tagId))
-        .where(inArray(clipTags.clipId, clipIds));
-      for (const r of rows) {
-        if (!map[r.clipId]) map[r.clipId] = [];
-        map[r.clipId].push(r.tagName);
-      }
+      const rows = await db.select({ clipId: clipTags.clipId, tagName: tags.name }).from(clipTags)
+        .innerJoin(tags, eq(tags.id, clipTags.tagId)).where(inArray(clipTags.clipId, clipIds));
+      for (const r of rows) { if (!map[r.clipId]) map[r.clipId] = []; map[r.clipId].push(r.tagName); }
     }
 
     return NextResponse.json({
-      clips: result.map((c) => ({ ...c, tags: map[c.id] || [] })),
+      clips: result.map((c: { id: number }) => ({ ...c, tags: map[c.id] || [] })),
       total: countResult[0]?.count || 0,
     });
   } catch (err) {
-    console.error("GET /api/clips error:", err);
+    console.error("GET /api/clips:", err);
     return NextResponse.json({ clips: [], total: 0 });
   }
 }
 
 export async function POST(req: NextRequest) {
-  // Step-by-step with granular error catching
   let body: Record<string, unknown>;
-
-  // Step 1: Parse body
-  try {
-    body = await req.json();
-  } catch (e) {
-    console.error("POST /api/clips — body parse error:", e);
+  try { body = await req.json(); } catch {
     return NextResponse.json({ error: "Body không hợp lệ" }, { status: 400 });
   }
 
@@ -115,83 +90,49 @@ export async function POST(req: NextRequest) {
   if (!sourceUrl || typeof sourceUrl !== "string" || !sourceUrl.trim()) {
     return NextResponse.json({ error: "Link is required" }, { status: 400 });
   }
-
   const cleanUrl = String(sourceUrl).trim();
 
-  // Step 2: Duplicate check
   try {
-    const existing = await db
-      .select()
-      .from(clips)
-      .where(eq(clips.sourceUrl, cleanUrl))
-      .limit(1);
+    const db = getDb();
+
+    const existing = await db.select().from(clips).where(eq(clips.sourceUrl, cleanUrl)).limit(1);
     if (existing.length > 0) {
-      return NextResponse.json(
-        { error: "duplicate", message: "Clip này đã có trong kho rồi!" },
-        { status: 409 }
-      );
+      return NextResponse.json({ error: "duplicate", message: "Clip này đã có trong kho rồi!" }, { status: 409 });
     }
-  } catch (e) {
-    console.error("POST /api/clips — duplicate check error:", e);
-    const msg = e instanceof Error ? e.message : "unknown";
-    return NextResponse.json(
-      { error: `DB lỗi khi kiểm tra trùng: ${msg}` },
-      { status: 500 }
-    );
-  }
 
-  // Step 3: Parse fields safely
-  const str = (v: unknown): string | null =>
-    v != null && typeof v === "string" && v.trim().length > 0
-      ? v.trim()
-      : null;
+    let colId: number | null = null;
+    const raw = body.collectionId;
+    if (raw != null && raw !== "" && raw !== false) {
+      const n = typeof raw === "number" ? raw : parseInt(String(raw));
+      if (!isNaN(n) && n > 0) colId = n;
+    }
 
-  let colId: number | null = null;
-  const rawColId = body.collectionId;
-  if (rawColId != null && rawColId !== "" && rawColId !== false) {
-    const n =
-      typeof rawColId === "number" ? rawColId : parseInt(String(rawColId));
-    if (!isNaN(n) && n > 0) colId = n;
-  }
+    const s = (v: unknown): string | null =>
+      v != null && typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
 
-  // Step 4: Insert clip
-  let newClipId: number;
-  try {
-    const [newClip] = await db
-      .insert(clips)
-      .values({
-        sourceUrl: cleanUrl,
-        creatorName: str(body.creatorName),
-        creatorHandle: str(body.creatorHandle),
-        previewImage: str(body.previewImage),
-        customTitle: str(body.customTitle),
-        note: str(body.note),
-        saveReason: str(body.saveReason),
-        collectionId: colId,
-      })
-      .returning();
-    newClipId = newClip.id;
+    const [newClip] = await db.insert(clips).values({
+      sourceUrl: cleanUrl,
+      creatorName: s(body.creatorName),
+      creatorHandle: s(body.creatorHandle),
+      previewImage: s(body.previewImage),
+      customTitle: s(body.customTitle),
+      note: s(body.note),
+      saveReason: s(body.saveReason),
+      collectionId: colId,
+    }).returning();
 
-    // Step 5: Insert tags
     const tagIds = body.tagIds;
     if (tagIds && Array.isArray(tagIds) && tagIds.length > 0) {
-      const valid = tagIds
-        .map((id: unknown) => Number(id))
-        .filter((n: number) => !isNaN(n) && n > 0);
+      const valid = tagIds.map((id: unknown) => Number(id)).filter((n: number) => !isNaN(n) && n > 0);
       if (valid.length > 0) {
-        await db
-          .insert(clipTags)
-          .values(valid.map((tagId: number) => ({ clipId: newClip.id, tagId })));
+        await db.insert(clipTags).values(valid.map((tagId: number) => ({ clipId: newClip.id, tagId })));
       }
     }
 
     return NextResponse.json({ clip: newClip }, { status: 201 });
-  } catch (e) {
-    console.error("POST /api/clips — insert error:", e);
-    const msg = e instanceof Error ? e.message : "unknown";
-    return NextResponse.json(
-      { error: `DB lỗi khi lưu: ${msg}` },
-      { status: 500 }
-    );
+  } catch (err) {
+    console.error("POST /api/clips:", err);
+    const msg = err instanceof Error ? err.message : "unknown";
+    return NextResponse.json({ error: `DB lỗi: ${msg}` }, { status: 500 });
   }
 }
