@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import BottomNav from "@/components/BottomNav";
 import HomeTab from "@/components/tabs/HomeTab";
 import SearchTab from "@/components/tabs/SearchTab";
@@ -15,23 +15,24 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabKey>("home");
   const [toast, setToast] = useState<{ msg: string; id: number } | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((msg: string) => {
+    // Clear previous timer
+    if (timerRef.current) clearTimeout(timerRef.current);
     setToast({ msg, id: Date.now() });
-    setTimeout(() => setToast(null), 2200);
+    timerRef.current = setTimeout(() => setToast(null), 2500);
   }, []);
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const onSaved = useCallback(() => {
-    // Toast is shown by SaveTab with timestamp
     refresh();
     setActiveTab("home");
   }, [refresh]);
 
   return (
     <div className="flex flex-col h-dvh">
-      {/* Tab content */}
       <main className="flex-1 overflow-y-auto pb-[76px] hide-scroll">
         <div key={`${activeTab}-${refreshKey}`} className="anim-fade">
           {activeTab === "home" && (
