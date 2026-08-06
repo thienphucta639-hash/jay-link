@@ -1,45 +1,42 @@
-import { drizzle } from "drizzle-orm/node-postgres";
+import { drizzle, NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 
-const databaseUrl = process.env.DATABASE_URL;
+// Lazy pool — only created on first actual DB call
+let _pool: Pool | null = null;
+let _db: NodePgDatabase | null = null;
 
-if (!databaseUrl) {
-  console.warn("⚠️ DATABASE_URL not set — database features disabled");
-}
+function getPool(): Pool {
+  if (_pool) return _pool;
 
-const globalForDb = globalThis as typeof globalThis & {
-  __pgPool?: Pool;
-};
-
-function createPool() {
-  if (!databaseUrl) return null;
-  if (globalForDb.__pgPool) return globalForDb.__pgPool;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    throw new Error("DATABASE_URL is not set");
+  }
 
   const isLocal =
-    databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1");
+    url.includes("localhost") || url.includes("127.0.0.1");
 
-  const pool = new Pool({
-    connectionString: databaseUrl,
+  _pool = new Pool({
+    connectionString: url,
     ssl: isLocal ? false : { rejectUnauthorized: false },
-    max: 5,
+    max: 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
   });
 
-  pool.on("error", (err) => {
-    console.error("Pool error:", err.message);
+  _pool.on("error", (err) => {
+    console.error("Unexpected PG pool error:", err.message);
   });
 
-  globalForDb.__pgPool = pool;
-  return pool;
+  return _pool;
 }
 
-const pool = createPool();
-
-export const db = pool
-  ? drizzle(pool)
-  : (null as unknown as ReturnType<typeof drizzle>);
-
-export function isDbReady(): boolean {
-  return pool !== null;
-}
+// db getter — creates connection lazily on first use
+export const db: NodePgDatabase = new Proxy({} as NodePgDatabase, {
+  get(_target, prop) {
+    if (!_db) {
+      _db = drizzle(getPool());
+    }
+    return (_db as unknown as Record<string | symbol, unknown>)[prop];
+  },
+});
