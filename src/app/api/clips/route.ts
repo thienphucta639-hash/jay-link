@@ -100,55 +100,98 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  // Step-by-step with granular error catching
+  let body: Record<string, unknown>;
+
+  // Step 1: Parse body
   try {
-    const body = await req.json();
-    const { sourceUrl, customTitle, creatorHandle, creatorName, previewImage, note, saveReason, collectionId, tagIds } = body;
+    body = await req.json();
+  } catch (e) {
+    console.error("POST /api/clips — body parse error:", e);
+    return NextResponse.json({ error: "Body không hợp lệ" }, { status: 400 });
+  }
 
-    if (!sourceUrl || typeof sourceUrl !== "string" || !sourceUrl.trim()) {
-      return NextResponse.json({ error: "Link is required" }, { status: 400 });
-    }
+  const sourceUrl = body.sourceUrl;
+  if (!sourceUrl || typeof sourceUrl !== "string" || !sourceUrl.trim()) {
+    return NextResponse.json({ error: "Link is required" }, { status: 400 });
+  }
 
-    const url = sourceUrl.trim();
+  const cleanUrl = String(sourceUrl).trim();
 
-    // Duplicate check
-    const existing = await db.select().from(clips).where(eq(clips.sourceUrl, url)).limit(1);
+  // Step 2: Duplicate check
+  try {
+    const existing = await db
+      .select()
+      .from(clips)
+      .where(eq(clips.sourceUrl, cleanUrl))
+      .limit(1);
     if (existing.length > 0) {
-      return NextResponse.json({ error: "duplicate", existingClip: existing[0], message: "Clip này đã có trong kho rồi!" }, { status: 409 });
+      return NextResponse.json(
+        { error: "duplicate", message: "Clip này đã có trong kho rồi!" },
+        { status: 409 }
+      );
     }
+  } catch (e) {
+    console.error("POST /api/clips — duplicate check error:", e);
+    const msg = e instanceof Error ? e.message : "unknown";
+    return NextResponse.json(
+      { error: `DB lỗi khi kiểm tra trùng: ${msg}` },
+      { status: 500 }
+    );
+  }
 
-    // Safe parse collectionId
-    let colId: number | null = null;
-    if (collectionId != null && collectionId !== "" && collectionId !== false) {
-      const n = typeof collectionId === "number" ? collectionId : parseInt(String(collectionId));
-      if (!isNaN(n) && n > 0) colId = n;
-    }
+  // Step 3: Parse fields safely
+  const str = (v: unknown): string | null =>
+    v != null && typeof v === "string" && v.trim().length > 0
+      ? v.trim()
+      : null;
 
-    const s = (v: unknown) => (v && typeof v === "string" && v.trim() ? v.trim() : null);
+  let colId: number | null = null;
+  const rawColId = body.collectionId;
+  if (rawColId != null && rawColId !== "" && rawColId !== false) {
+    const n =
+      typeof rawColId === "number" ? rawColId : parseInt(String(rawColId));
+    if (!isNaN(n) && n > 0) colId = n;
+  }
 
+  // Step 4: Insert clip
+  let newClipId: number;
+  try {
     const [newClip] = await db
       .insert(clips)
       .values({
-        sourceUrl: url,
-        creatorName: s(creatorName),
-        creatorHandle: s(creatorHandle),
-        previewImage: s(previewImage),
-        customTitle: s(customTitle),
-        note: s(note),
-        saveReason: s(saveReason),
+        sourceUrl: cleanUrl,
+        creatorName: str(body.creatorName),
+        creatorHandle: str(body.creatorHandle),
+        previewImage: str(body.previewImage),
+        customTitle: str(body.customTitle),
+        note: str(body.note),
+        saveReason: str(body.saveReason),
         collectionId: colId,
       })
       .returning();
+    newClipId = newClip.id;
 
+    // Step 5: Insert tags
+    const tagIds = body.tagIds;
     if (tagIds && Array.isArray(tagIds) && tagIds.length > 0) {
-      const valid = tagIds.map((id: unknown) => Number(id)).filter((n) => !isNaN(n) && n > 0);
+      const valid = tagIds
+        .map((id: unknown) => Number(id))
+        .filter((n: number) => !isNaN(n) && n > 0);
       if (valid.length > 0) {
-        await db.insert(clipTags).values(valid.map((tagId) => ({ clipId: newClip.id, tagId })));
+        await db
+          .insert(clipTags)
+          .values(valid.map((tagId: number) => ({ clipId: newClip.id, tagId })));
       }
     }
 
     return NextResponse.json({ clip: newClip }, { status: 201 });
-  } catch (err) {
-    console.error("POST /api/clips error:", err);
-    return NextResponse.json({ error: "Lỗi server khi lưu clip" }, { status: 500 });
+  } catch (e) {
+    console.error("POST /api/clips — insert error:", e);
+    const msg = e instanceof Error ? e.message : "unknown";
+    return NextResponse.json(
+      { error: `DB lỗi khi lưu: ${msg}` },
+      { status: 500 }
+    );
   }
 }
