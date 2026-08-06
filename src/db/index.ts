@@ -1,39 +1,61 @@
 import { drizzle, NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
 
-// Force load .env — Next.js production sometimes misses it
-dotenv.config();
-
-let _pool: Pool | null = null;
 let _db: NodePgDatabase | null = null;
+
+function loadDatabaseUrl(): string {
+  // 1) Check process.env first
+  if (process.env.DATABASE_URL) {
+    return process.env.DATABASE_URL;
+  }
+
+  // 2) Manually read .env file
+  const envPaths = [
+    path.resolve(process.cwd(), ".env"),
+    path.resolve(__dirname, "../../.env"),
+    path.resolve(__dirname, "../../../.env"),
+    "/app/.env",
+  ];
+
+  for (const p of envPaths) {
+    try {
+      if (fs.existsSync(p)) {
+        const content = fs.readFileSync(p, "utf-8");
+        const match = content.match(
+          /^DATABASE_URL\s*=\s*(.+)$/m
+        );
+        if (match) {
+          const url = match[1].trim().replace(/^["']|["']$/g, "");
+          // Also set it for future use
+          process.env.DATABASE_URL = url;
+          return url;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  throw new Error(
+    "DATABASE_URL not found in env or .env file"
+  );
+}
 
 export function getDb(): NodePgDatabase {
   if (_db) return _db;
 
-  // Try multiple sources for DATABASE_URL
-  let url = process.env.DATABASE_URL;
+  const url = loadDatabaseUrl();
+  const isLocal =
+    url.includes("localhost") || url.includes("127.0.0.1");
 
-  if (!url) {
-    // Try loading .env again
-    dotenv.config();
-    url = process.env.DATABASE_URL;
-  }
-
-  if (!url) {
-    throw new Error(
-      "DATABASE_URL not found. Set it in .env or environment variables."
-    );
-  }
-
-  const isLocal = url.includes("localhost") || url.includes("127.0.0.1");
-
-  _pool = new Pool({
+  const pool = new Pool({
     connectionString: url,
     ssl: isLocal ? false : { rejectUnauthorized: false },
     max: 10,
   });
 
-  _db = drizzle(_pool);
+  _db = drizzle(pool);
   return _db;
 }
