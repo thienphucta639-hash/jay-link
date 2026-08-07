@@ -18,7 +18,6 @@ export default function App() {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((msg: string) => {
-    // Clear previous timer
     if (timerRef.current) clearTimeout(timerRef.current);
     setToast({ msg, id: Date.now() });
     timerRef.current = setTimeout(() => setToast(null), 2500);
@@ -27,28 +26,23 @@ export default function App() {
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const onSaved = useCallback(() => {
+    // Show toast THEN switch tab
+    showToast(`Đã ghim lúc ${new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })}! 📌`);
     refresh();
     setActiveTab("home");
-  }, [refresh]);
+  }, [refresh, showToast]);
 
   return (
     <div className="flex flex-col h-dvh">
       <main className="flex-1 overflow-y-auto pb-[76px] hide-scroll">
         <div key={`${activeTab}-${refreshKey}`} className="anim-fade">
-          {activeTab === "home" && (
-            <HomeTab onNav={setActiveTab} toast={showToast} />
-          )}
+          {activeTab === "home" && <HomeTab onNav={setActiveTab} toast={showToast} />}
           {activeTab === "search" && <SearchTab toast={showToast} />}
-          {activeTab === "save" && (
-            <SaveTab onSaved={onSaved} toast={showToast} />
-          )}
-          {activeTab === "collections" && (
-            <CollectionsTab toast={showToast} />
-          )}
+          {activeTab === "save" && <SaveTab onSaved={onSaved} toast={showToast} />}
+          {activeTab === "collections" && <CollectionsTab toast={showToast} />}
           {activeTab === "profile" && <ProfileTab toast={showToast} />}
         </div>
       </main>
-
       <BottomNav active={activeTab} onChange={setActiveTab} />
       {toast && <Toast key={toast.id} message={toast.msg} />}
     </div>
