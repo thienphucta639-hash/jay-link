@@ -3,6 +3,21 @@ import { withRetry, rawQuery, extractError } from "@/db";
 import { clips, clipTags, tags } from "@/db/schema";
 import { eq, desc, ilike, or, sql, and, gte, inArray } from "drizzle-orm";
 
+function isValidTikTokUrl(input: string): boolean {
+  try {
+    const url = new URL(input.trim());
+    const host = url.hostname.toLowerCase();
+    return ["tiktok.com","www.tiktok.com","m.tiktok.com","vm.tiktok.com","vt.tiktok.com"].includes(host);
+  } catch { return false; }
+}
+
+function cleanTikTokUrl(input: string): string {
+  try {
+    const url = new URL(input.trim());
+    return `${url.origin}${url.pathname}`;
+  } catch { return input.trim(); }
+}
+
 export async function GET(req: NextRequest) {
   try {
     return await withRetry(async (db) => {
@@ -53,35 +68,31 @@ export async function GET(req: NextRequest) {
 }
 
 interface ClipRow {
-  id: number;
-  source_url: string;
-  creator_name: string | null;
-  creator_handle: string | null;
-  preview_image: string | null;
-  custom_title: string | null;
-  note: string | null;
-  save_reason: string | null;
-  watch_status: string;
-  is_pinned: boolean;
-  saved_at: string;
-  last_opened_at: string | null;
-  open_count: number;
-  collection_id: number | null;
+  id: number; source_url: string; creator_name: string | null; creator_handle: string | null;
+  preview_image: string | null; custom_title: string | null; note: string | null;
+  save_reason: string | null; watch_status: string; is_pinned: boolean;
+  saved_at: string; last_opened_at: string | null; open_count: number; collection_id: number | null;
 }
 
 export async function POST(req: NextRequest) {
+  // 1. Parse body
   let body: Record<string, unknown>;
-  try { body = await req.json(); } catch { return NextResponse.json({ error: "Body không hợp lệ" }, { status: 400 }); }
+  try { body = await req.json(); } catch {
+    return NextResponse.json({ error: "Body không hợp lệ" }, { status: 400 });
+  }
 
+  // 2. Validate URL strictly
   const sourceUrl = body.sourceUrl;
-  if (!sourceUrl || typeof sourceUrl !== "string" || !sourceUrl.trim())
-    return NextResponse.json({ error: "Link is required" }, { status: 400 });
+  if (!sourceUrl || typeof sourceUrl !== "string") {
+    return NextResponse.json({ error: "Cần dán link TikTok" }, { status: 400 });
+  }
+  if (!isValidTikTokUrl(sourceUrl)) {
+    return NextResponse.json({ error: "Link không phải TikTok. Cần link dạng https://www.tiktok.com/..." }, { status: 400 });
+  }
 
-  // Clean URL — remove tracking params
-  let cleanUrl = String(sourceUrl).trim();
-  try { const parsed = new URL(cleanUrl); cleanUrl = `${parsed.origin}${parsed.pathname}`; } catch {}
+  const cleanUrl = cleanTikTokUrl(sourceUrl);
 
-  // Parse optional fields
+  // 3. Parse optional fields
   const str = (v: unknown): string | null => v != null && typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
   let colId: number | null = null;
   const rawCol = body.collectionId;
@@ -90,77 +101,48 @@ export async function POST(req: NextRequest) {
     if (!isNaN(n) && n > 0) colId = n;
   }
 
+  // 4. DB operations with raw SQL
   try {
-    // Use RAW SQL — bypass Drizzle completely for reliability
-    
-    // 1. Check duplicate
     const existing = await rawQuery<{ id: number }>(
       "SELECT id FROM clips WHERE source_url = $1 LIMIT 1",
       [cleanUrl]
     );
     if (existing.length > 0) {
-      return NextResponse.json(
-        { error: "duplicate", message: "Clip này đã có trong kho rồi!" },
-        { status: 409 }
-      );
+      return NextResponse.json({ error: "duplicate", message: "Clip này đã có trong kho rồi!" }, { status: 409 });
     }
 
-    // 2. Insert clip
     const inserted = await rawQuery<ClipRow>(
       `INSERT INTO clips (source_url, creator_name, creator_handle, preview_image, custom_title, note, save_reason, collection_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [
-        cleanUrl,
-        str(body.creatorName),
-        str(body.creatorHandle),
-        str(body.previewImage),
-        str(body.customTitle),
-        str(body.note),
-        str(body.saveReason),
-        colId,
-      ]
+      [cleanUrl, str(body.creatorName), str(body.creatorHandle), str(body.previewImage), str(body.customTitle), str(body.note), str(body.saveReason), colId]
     );
 
     if (inserted.length === 0) {
-      return NextResponse.json({ error: "Insert thất bại" }, { status: 500 });
+      return NextResponse.json({ error: "Không thể lưu clip" }, { status: 500 });
     }
 
-    const newClip = inserted[0];
+    const clip = inserted[0];
 
-    // 3. Insert tags
     const tagIds = body.tagIds;
     if (tagIds && Array.isArray(tagIds) && tagIds.length > 0) {
       const valid = tagIds.map((id: unknown) => Number(id)).filter((n: number) => !isNaN(n) && n > 0);
       for (const tagId of valid) {
-        await rawQuery(
-          "INSERT INTO clip_tags (clip_id, tag_id) VALUES ($1, $2)",
-          [newClip.id, tagId]
-        );
+        await rawQuery("INSERT INTO clip_tags (clip_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [clip.id, tagId]);
       }
     }
 
     return NextResponse.json({
       clip: {
-        id: newClip.id,
-        sourceUrl: newClip.source_url,
-        creatorName: newClip.creator_name,
-        creatorHandle: newClip.creator_handle,
-        previewImage: newClip.preview_image,
-        customTitle: newClip.custom_title,
-        note: newClip.note,
-        saveReason: newClip.save_reason,
-        watchStatus: newClip.watch_status,
-        isPinned: newClip.is_pinned,
-        savedAt: newClip.saved_at,
-        lastOpenedAt: newClip.last_opened_at,
-        openCount: newClip.open_count,
-        collectionId: newClip.collection_id,
+        id: clip.id, sourceUrl: clip.source_url, creatorName: clip.creator_name,
+        creatorHandle: clip.creator_handle, previewImage: clip.preview_image,
+        customTitle: clip.custom_title, note: clip.note, saveReason: clip.save_reason,
+        watchStatus: clip.watch_status, isPinned: clip.is_pinned, savedAt: clip.saved_at,
+        lastOpenedAt: clip.last_opened_at, openCount: clip.open_count, collectionId: clip.collection_id,
       },
     }, { status: 201 });
   } catch (err: unknown) {
-    console.error("POST /api/clips raw error:", err);
-    const detail = extractError(err);
-    return NextResponse.json({ error: detail }, { status: 500 });
+    console.error("POST /api/clips:", err);
+    return NextResponse.json({ error: extractError(err) }, { status: 500 });
   }
 }

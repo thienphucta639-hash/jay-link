@@ -9,6 +9,28 @@ interface Props {
   toast: (msg: string) => void;
 }
 
+// ── Strict TikTok URL validation ──
+function isTikTokUrl(input: string): boolean {
+  const text = input.trim();
+  if (!text) return false;
+  // Must start with http:// or https://
+  if (!text.startsWith("http://") && !text.startsWith("https://")) return false;
+  try {
+    const url = new URL(text);
+    const host = url.hostname.toLowerCase();
+    // Only these domains are valid TikTok
+    return (
+      host === "tiktok.com" ||
+      host === "www.tiktok.com" ||
+      host === "m.tiktok.com" ||
+      host === "vm.tiktok.com" ||
+      host === "vt.tiktok.com"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export default function SaveTab({ onSaved, toast }: Props) {
   const [link, setLink] = useState("");
   const [title, setTitle] = useState("");
@@ -22,111 +44,89 @@ export default function SaveTab({ onSaved, toast }: Props) {
   const [saving, setSaving] = useState(false);
   const [newTag, setNewTag] = useState("");
   const [showMore, setShowMore] = useState(false);
-  const [errorDetail, setErrorDetail] = useState("");
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/collections")
-      .then((r) => r.json())
-      .then((d) => setCols(d.collections || []))
-      .catch(() => {});
-    fetch("/api/tags")
-      .then((r) => r.json())
-      .then((d) => setTags(d.tags || []))
-      .catch(() => {});
+    fetch("/api/collections").then((r) => r.json()).then((d) => setCols(d.collections || [])).catch(() => {});
+    fetch("/api/tags").then((r) => r.json()).then((d) => setTags(d.tags || [])).catch(() => {});
   }, []);
 
+  // Auto-detect clipboard
   useEffect(() => {
     try {
       navigator.clipboard?.readText().then((text) => {
-        if (text && (text.includes("tiktok.com") || text.includes("vm.tiktok.com"))) {
-          setLink(text.trim());
-        }
+        if (isTikTokUrl(text)) setLink(text.trim());
       }).catch(() => {});
     } catch {}
   }, []);
 
-  const trimmedLink = link.trim();
-  const isValid = trimmedLink.length > 0 && trimmedLink.includes("tiktok.com");
+  const trimmed = link.trim();
+  const valid = isTikTokUrl(trimmed);
+  const hasInput = trimmed.length > 0;
 
   const submit = async () => {
-    if (!trimmedLink) { toast("Dán link vô đây nha!"); return; }
-    if (!isValid) { toast("Cần link TikTok!"); return; }
+    setError("");
+
+    if (!hasInput) {
+      toast("Dán link vô đây nha!");
+      return;
+    }
+
+    if (!valid) {
+      setError("Link không hợp lệ. Cần link dạng: https://www.tiktok.com/@user/video/...");
+      return;
+    }
 
     setSaving(true);
-    setErrorDetail("");
 
-    const payload = {
-      sourceUrl: trimmedLink,
-      customTitle: title.trim() || null,
-      creatorHandle: creator.replace("@", "").trim() || null,
-      creatorName: null,
-      previewImage: null,
-      note: note.trim() || null,
-      saveReason: reason || null,
-      collectionId: colId,
-      tagIds: tagIds,
-    };
-
-    let res: Response;
     try {
-      res = await fetch("/api/clips", {
+      const res = await fetch("/api/clips", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          sourceUrl: trimmed,
+          customTitle: title.trim() || null,
+          creatorHandle: creator.replace("@", "").trim() || null,
+          creatorName: null,
+          previewImage: null,
+          note: note.trim() || null,
+          saveReason: reason || null,
+          collectionId: colId,
+          tagIds,
+        }),
       });
-    } catch (networkErr) {
-      // Network error — fetch itself failed
-      const msg = networkErr instanceof Error ? networkErr.message : "Network error";
-      setErrorDetail(`Lỗi mạng: ${msg}`);
-      toast("Không kết nối được server!");
-      setSaving(false);
-      return;
-    }
 
-    // We got a response — parse it
-    let data: Record<string, unknown> = {};
-    try {
-      data = await res.json();
-    } catch {
-      setErrorDetail(`Server trả status ${res.status} nhưng không phải JSON`);
-      toast("Lỗi server!");
-      setSaving(false);
-      return;
-    }
+      const data = await res.json();
 
-    if (res.status === 409) {
-      toast(String(data.message || "Clip này đã có trong kho rồi!"));
-      setSaving(false);
-      return;
-    }
+      if (res.status === 201) {
+        const t = new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+        toast(`Đã ghim lúc ${t}! 📌`);
+        setLink(""); setTitle(""); setCreator(""); setNote(""); setReason("");
+        setColId(null); setTagIds([]); setShowMore(false); setError("");
+        setSaving(false);
+        setTimeout(() => onSaved(), 400);
+        return;
+      }
 
-    if (res.status === 201) {
-      // SUCCESS!
-      const now = new Date();
-      const t = now.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
-      toast(`Đã ghim lúc ${t}! 📌`);
-      setLink(""); setTitle(""); setCreator(""); setNote(""); setReason("");
-      setColId(null); setTagIds([]); setShowMore(false); setErrorDetail("");
-      setSaving(false);
-      setTimeout(() => onSaved(), 400);
-      return;
-    }
+      if (res.status === 409) {
+        setError("Clip này đã có trong kho rồi!");
+        setSaving(false);
+        return;
+      }
 
-    // Any other error
-    const errMsg = String(data.error || `Lỗi ${res.status}`);
-    setErrorDetail(errMsg);
-    toast(errMsg);
-    setSaving(false);
+      setError(String(data.error || `Lỗi server (${res.status})`));
+      setSaving(false);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Lỗi mạng";
+      setError(`Không kết nối được: ${msg}`);
+      setSaving(false);
+    }
   };
 
   const addTag = async () => {
     if (!newTag.trim()) return;
     try {
-      const res = await fetch("/api/tags", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newTag.trim() }),
-      });
+      const res = await fetch("/api/tags", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: newTag.trim() }) });
       const data = await res.json();
       if (data.tag) {
         setTags((p) => p.find((t) => t.id === data.tag.id) ? p : [...p, data.tag]);
@@ -144,37 +144,56 @@ export default function SaveTab({ onSaved, toast }: Props) {
       </div>
 
       <div className="space-y-4">
-        {/* Link */}
-        <div className="anim-pop">
+        {/* ── Link input ── */}
+        <div>
           <label className="text-[12px] font-bold text-muted mb-2 block">🔗 Link TikTok *</label>
           <input
             type="url"
             value={link}
-            onChange={(e) => { setLink(e.target.value); setErrorDetail(""); }}
+            onChange={(e) => { setLink(e.target.value); setError(""); }}
             placeholder="https://www.tiktok.com/@user/video/..."
-            className="w-full bg-card rounded-2xl px-4 py-4 text-[14px] border-2 border-lavender/30 focus:border-lavender outline-none transition-colors shadow-sm"
+            className={`w-full bg-card rounded-2xl px-4 py-4 text-[14px] border-2 outline-none transition-colors shadow-sm ${
+              !hasInput ? "border-lavender/30 focus:border-lavender" :
+              valid ? "border-aqua/50 focus:border-aqua" :
+              "border-coral/50 focus:border-coral"
+            }`}
             autoComplete="off"
           />
-          {link && (
-            <div className="mt-2 flex items-center gap-2">
-              {isValid ? (
-                <span className="text-[12px] text-aqua font-bold">✓ Link hợp lệ</span>
+
+          {/* Status indicator */}
+          {hasInput && (
+            <div className="mt-2 flex items-center justify-between">
+              {valid ? (
+                <span className="text-[12px] text-aqua font-bold flex items-center gap-1">
+                  <span className="w-4 h-4 bg-aqua/20 rounded-full flex items-center justify-center text-[10px]">✓</span>
+                  Link TikTok hợp lệ
+                </span>
               ) : (
-                <span className="text-[12px] text-coral font-bold">✗ Cần link TikTok</span>
+                <span className="text-[12px] text-coral font-bold flex items-center gap-1">
+                  <span className="w-4 h-4 bg-coral/20 rounded-full flex items-center justify-center text-[10px]">✗</span>
+                  Không phải link TikTok
+                </span>
               )}
-              <button onClick={() => { setLink(""); setErrorDetail(""); }} className="text-[11px] text-muted underline">Xóa</button>
+              <button onClick={() => { setLink(""); setError(""); }} className="text-[11px] text-muted underline">Xóa</button>
             </div>
           )}
         </div>
 
-        {/* Save button */}
+        {/* ── Error box ── */}
+        {error && (
+          <div className="bg-coral/10 border border-coral/20 rounded-2xl p-3 text-[12px] text-coral font-semibold">
+            ⚠️ {error}
+          </div>
+        )}
+
+        {/* ── Save button ── */}
         <button
           onClick={submit}
-          disabled={saving || !trimmedLink}
+          disabled={saving || !valid}
           className={`w-full py-4 rounded-2xl font-bold text-[15px] press transition-all shadow-lg ${
-            saving || !trimmedLink
-              ? "bg-muted/20 text-muted cursor-not-allowed"
-              : "bg-coral text-white shadow-coral/25 active:scale-[0.98]"
+            saving ? "bg-muted/30 text-muted" :
+            !valid ? "bg-muted/15 text-muted/50 cursor-not-allowed" :
+            "bg-coral text-white shadow-coral/25 active:scale-[0.98]"
           }`}
         >
           {saving ? (
@@ -185,22 +204,15 @@ export default function SaveTab({ onSaved, toast }: Props) {
           ) : "📌 Ghim clip"}
         </button>
 
-        {/* Error detail */}
-        {errorDetail && (
-          <div className="bg-coral/10 border border-coral/20 rounded-2xl p-3 text-[12px] text-coral font-semibold">
-            ⚠️ {errorDetail}
-          </div>
+        {/* ── Details toggle ── */}
+        {valid && (
+          <button onClick={() => setShowMore(!showMore)} className="w-full text-center text-[13px] text-lavender font-bold py-2 press">
+            {showMore ? "▲ Ẩn chi tiết" : "▼ Thêm chi tiết (tuỳ chọn)"}
+          </button>
         )}
 
-        {/* Toggle details */}
-        <button
-          onClick={() => setShowMore(!showMore)}
-          className="w-full text-center text-[13px] text-lavender font-bold py-2 press"
-        >
-          {showMore ? "▲ Ẩn chi tiết" : "▼ Thêm chi tiết (tuỳ chọn)"}
-        </button>
-
-        {showMore && (
+        {/* ── Detail fields ── */}
+        {showMore && valid && (
           <div className="space-y-4 pt-2 anim-slide-dn">
             <div>
               <label className="text-[12px] font-bold text-muted mb-1.5 block">✏️ Tên clip</label>
@@ -268,14 +280,20 @@ export default function SaveTab({ onSaved, toast }: Props) {
           </div>
         )}
 
+        {/* ── Instructions ── */}
         <div className="bg-soft/50 rounded-2xl p-4 mt-4">
           <p className="text-[12px] font-bold text-muted mb-2">💡 Cách lấy link TikTok:</p>
-          <ol className="text-[11px] text-muted space-y-1 list-decimal list-inside">
+          <ol className="text-[11px] text-muted space-y-1.5 list-decimal list-inside">
             <li>Mở video TikTok bạn muốn lưu</li>
             <li>Bấm nút <b>Chia sẻ</b> (mũi tên)</li>
             <li>Chọn <b>Sao chép liên kết</b></li>
-            <li>Quay lại đây dán link</li>
+            <li>Quay lại đây, dán link vào ô trên</li>
           </ol>
+          <div className="mt-3 p-2 bg-card rounded-xl">
+            <p className="text-[10px] text-muted/70">Link hợp lệ trông như:</p>
+            <p className="text-[11px] text-lavender font-mono mt-0.5 break-all">https://www.tiktok.com/@user/video/123...</p>
+            <p className="text-[11px] text-lavender font-mono mt-0.5 break-all">https://vm.tiktok.com/ZM...</p>
+          </div>
         </div>
       </div>
     </div>
