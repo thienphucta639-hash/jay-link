@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb } from "@/db";
+import { getDb, testConnection } from "@/db";
 import { clips, clipTags, tags } from "@/db/schema";
 import { eq, desc, ilike, or, sql, and, gte, inArray } from "drizzle-orm";
 
@@ -90,16 +90,33 @@ export async function POST(req: NextRequest) {
   if (!sourceUrl || typeof sourceUrl !== "string" || !sourceUrl.trim()) {
     return NextResponse.json({ error: "Link is required" }, { status: 400 });
   }
-  const cleanUrl = String(sourceUrl).trim();
+
+  // Clean URL — strip tracking params
+  let cleanUrl = String(sourceUrl).trim();
+  try {
+    const parsed = new URL(cleanUrl);
+    // Keep only the path, remove query params for cleaner storage
+    cleanUrl = `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    // URL parsing failed, use as-is
+  }
 
   try {
+    // Quick connection test
+    const connTest = await testConnection();
+    if (connTest !== "ok") {
+      return NextResponse.json({ error: `DB không kết nối được: ${connTest}` }, { status: 500 });
+    }
+
     const db = getDb();
 
-    const existing = await db.select().from(clips).where(eq(clips.sourceUrl, cleanUrl)).limit(1);
+    // Duplicate check
+    const existing = await db.select({ id: clips.id }).from(clips).where(eq(clips.sourceUrl, cleanUrl)).limit(1);
     if (existing.length > 0) {
       return NextResponse.json({ error: "duplicate", message: "Clip này đã có trong kho rồi!" }, { status: 409 });
     }
 
+    // Parse collectionId
     let colId: number | null = null;
     const raw = body.collectionId;
     if (raw != null && raw !== "" && raw !== false) {
@@ -110,6 +127,7 @@ export async function POST(req: NextRequest) {
     const s = (v: unknown): string | null =>
       v != null && typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
 
+    // Insert
     const [newClip] = await db.insert(clips).values({
       sourceUrl: cleanUrl,
       creatorName: s(body.creatorName),
@@ -121,6 +139,7 @@ export async function POST(req: NextRequest) {
       collectionId: colId,
     }).returning();
 
+    // Tags
     const tagIds = body.tagIds;
     if (tagIds && Array.isArray(tagIds) && tagIds.length > 0) {
       const valid = tagIds.map((id: unknown) => Number(id)).filter((n: number) => !isNaN(n) && n > 0);
@@ -130,9 +149,19 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ clip: newClip }, { status: 201 });
-  } catch (err) {
+  } catch (err: unknown) {
     console.error("POST /api/clips:", err);
-    const msg = err instanceof Error ? err.message : "unknown";
-    return NextResponse.json({ error: `DB lỗi: ${msg}` }, { status: 500 });
+
+    // Extract useful error info
+    let detail = "Unknown error";
+    if (err instanceof Error) {
+      detail = err.message;
+      // Check for pg-specific error codes
+      const pgErr = err as Error & { code?: string; detail?: string };
+      if (pgErr.code) detail = `[${pgErr.code}] ${detail}`;
+      if (pgErr.detail) detail += ` — ${pgErr.detail}`;
+    }
+
+    return NextResponse.json({ error: detail }, { status: 500 });
   }
 }
