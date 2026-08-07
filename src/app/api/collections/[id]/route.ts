@@ -1,30 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withRetry } from "@/db";
-import { collections } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { store } from "@/db/memory";
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  try {
-    const { id } = await params;
-    const body = await req.json();
-    return await withRetry(async (db) => {
-      const u: Record<string, unknown> = {};
-      if (body.name !== undefined) u.name = body.name;
-      if (body.color !== undefined) u.color = body.color;
-      if (body.isPinned !== undefined) u.isPinned = body.isPinned;
-      if (Object.keys(u).length > 0) await db.update(collections).set(u).where(eq(collections.id, parseInt(id)));
-      const [updated] = await db.select().from(collections).where(eq(collections.id, parseInt(id)));
-      return NextResponse.json({ collection: updated });
-    });
-  } catch (err) { console.error(err); return NextResponse.json({ error: "Server error" }, { status: 500 }); }
+  const { id } = await params;
+  const s = store();
+  const col = s.collections.find(c => c.id === parseInt(id));
+  if (!col) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  const body = await req.json();
+  if (body.name !== undefined) col.name = body.name;
+  if (body.color !== undefined) col.color = body.color;
+  if (body.isPinned !== undefined) col.isPinned = body.isPinned;
+  return NextResponse.json({ collection: col });
 }
 
 export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  try {
-    const { id } = await params;
-    return await withRetry(async (db) => {
-      await db.delete(collections).where(eq(collections.id, parseInt(id)));
-      return NextResponse.json({ success: true });
-    });
-  } catch (err) { console.error(err); return NextResponse.json({ error: "Server error" }, { status: 500 }); }
+  const { id } = await params;
+  const s = store();
+  const idx = s.collections.findIndex(c => c.id === parseInt(id));
+  if (idx >= 0) s.collections.splice(idx, 1);
+  // Unassign clips
+  s.clips.forEach(c => { if (c.collectionId === parseInt(id)) c.collectionId = null; });
+  return NextResponse.json({ success: true });
 }

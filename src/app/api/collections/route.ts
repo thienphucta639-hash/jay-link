@@ -1,28 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withRetry } from "@/db";
-import { collections } from "@/db/schema";
-import { sql, desc } from "drizzle-orm";
+import { store } from "@/db/memory";
 
 export async function GET() {
-  try {
-    return await withRetry(async (db) => {
-      const result = await db.select({
-        id: collections.id, name: collections.name, color: collections.color,
-        coverImage: collections.coverImage, isPinned: collections.isPinned, createdAt: collections.createdAt,
-        clipCount: sql<number>`(SELECT count(*) FROM clips WHERE clips.collection_id = ${collections.id})::int`,
-      }).from(collections).orderBy(desc(collections.isPinned), collections.createdAt);
-      return NextResponse.json({ collections: result });
-    });
-  } catch (err) { console.error(err); return NextResponse.json({ collections: [] }); }
+  const s = store();
+  const result = s.collections.map(c => ({
+    ...c,
+    coverImage: null,
+    clipCount: s.clips.filter(cl => cl.collectionId === c.id).length,
+  }));
+  result.sort((a, b) => {
+    if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+    return 0;
+  });
+  return NextResponse.json({ collections: result });
 }
 
 export async function POST(req: NextRequest) {
-  try {
-    const { name, color } = await req.json();
-    if (!name) return NextResponse.json({ error: "Name is required" }, { status: 400 });
-    return await withRetry(async (db) => {
-      const [c] = await db.insert(collections).values({ name, color: color || "#FF6B6B" }).returning();
-      return NextResponse.json({ collection: c }, { status: 201 });
-    });
-  } catch (err) { console.error(err); return NextResponse.json({ error: "Server error" }, { status: 500 }); }
+  const { name, color } = await req.json();
+  if (!name) return NextResponse.json({ error: "Name is required" }, { status: 400 });
+  const s = store();
+  const col = {
+    id: s.nextId.col++,
+    name,
+    color: color || "#FF6B6B",
+    isPinned: false,
+    createdAt: new Date().toISOString(),
+  };
+  s.collections.push(col);
+  return NextResponse.json({ collection: { ...col, coverImage: null, clipCount: 0 } }, { status: 201 });
 }
