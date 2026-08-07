@@ -14,7 +14,7 @@ export type TabKey = "home" | "search" | "save" | "collections" | "profile";
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabKey>("home");
   const [toast, setToast] = useState<{ msg: string; id: number } | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [refreshSignal, setRefreshSignal] = useState(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback((msg: string) => {
@@ -23,25 +23,20 @@ export default function App() {
     timerRef.current = setTimeout(() => setToast(null), 2500);
   }, []);
 
-  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
-
   const onSaved = useCallback(() => {
-    // Show toast THEN switch tab
     showToast(`Đã ghim lúc ${new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })}! 📌`);
-    refresh();
+    setRefreshSignal(n => n + 1);
     setActiveTab("home");
-  }, [refresh, showToast]);
+  }, [showToast]);
 
   return (
     <div className="flex flex-col h-dvh">
       <main className="flex-1 overflow-y-auto pb-[76px] hide-scroll">
-        <div key={`${activeTab}-${refreshKey}`} className="anim-fade">
-          {activeTab === "home" && <HomeTab onNav={setActiveTab} toast={showToast} />}
-          {activeTab === "search" && <SearchTab toast={showToast} />}
-          {activeTab === "save" && <SaveTab onSaved={onSaved} toast={showToast} />}
-          {activeTab === "collections" && <CollectionsTab toast={showToast} />}
-          {activeTab === "profile" && <ProfileTab toast={showToast} />}
-        </div>
+        {activeTab === "home" && <HomeTab onNav={setActiveTab} toast={showToast} refreshSignal={refreshSignal} />}
+        {activeTab === "search" && <SearchTab toast={showToast} />}
+        {activeTab === "save" && <SaveTab onSaved={onSaved} toast={showToast} />}
+        {activeTab === "collections" && <CollectionsTab toast={showToast} />}
+        {activeTab === "profile" && <ProfileTab toast={showToast} />}
       </main>
       <BottomNav active={activeTab} onChange={setActiveTab} />
       {toast && <Toast key={toast.id} message={toast.msg} />}
