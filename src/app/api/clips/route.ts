@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withRetry } from "@/db";
+import { withRetry, rawQuery, extractError } from "@/db";
 import { clips, clipTags, tags } from "@/db/schema";
 import { eq, desc, ilike, or, sql, and, gte, inArray } from "drizzle-orm";
 
@@ -37,7 +37,6 @@ export async function GET(req: NextRequest) {
       }
       const where = conditions.length > 0 ? and(...conditions) : undefined;
       const order = sortBy === "open_count" ? desc(clips.openCount) : sortBy === "last_opened" ? desc(clips.lastOpenedAt) : desc(clips.savedAt);
-
       const [result, countResult] = await Promise.all([
         db.select().from(clips).where(where).orderBy(desc(clips.isPinned), order).limit(limit).offset(offset),
         db.select({ count: sql<number>`count(*)::int` }).from(clips).where(where),
@@ -53,47 +52,115 @@ export async function GET(req: NextRequest) {
   } catch (err) { console.error("GET /api/clips:", err); return NextResponse.json({ clips: [], total: 0 }); }
 }
 
+interface ClipRow {
+  id: number;
+  source_url: string;
+  creator_name: string | null;
+  creator_handle: string | null;
+  preview_image: string | null;
+  custom_title: string | null;
+  note: string | null;
+  save_reason: string | null;
+  watch_status: string;
+  is_pinned: boolean;
+  saved_at: string;
+  last_opened_at: string | null;
+  open_count: number;
+  collection_id: number | null;
+}
+
 export async function POST(req: NextRequest) {
   let body: Record<string, unknown>;
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Body không hợp lệ" }, { status: 400 }); }
 
   const sourceUrl = body.sourceUrl;
-  if (!sourceUrl || typeof sourceUrl !== "string" || !sourceUrl.trim()) return NextResponse.json({ error: "Link is required" }, { status: 400 });
+  if (!sourceUrl || typeof sourceUrl !== "string" || !sourceUrl.trim())
+    return NextResponse.json({ error: "Link is required" }, { status: 400 });
 
+  // Clean URL — remove tracking params
   let cleanUrl = String(sourceUrl).trim();
   try { const parsed = new URL(cleanUrl); cleanUrl = `${parsed.origin}${parsed.pathname}`; } catch {}
 
+  // Parse optional fields
+  const str = (v: unknown): string | null => v != null && typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
+  let colId: number | null = null;
+  const rawCol = body.collectionId;
+  if (rawCol != null && rawCol !== "" && rawCol !== false) {
+    const n = typeof rawCol === "number" ? rawCol : parseInt(String(rawCol));
+    if (!isNaN(n) && n > 0) colId = n;
+  }
+
   try {
-    return await withRetry(async (db) => {
-      const existing = await db.select({ id: clips.id }).from(clips).where(eq(clips.sourceUrl, cleanUrl)).limit(1);
-      if (existing.length > 0) return NextResponse.json({ error: "duplicate", message: "Clip này đã có trong kho rồi!" }, { status: 409 });
-
-      let colId: number | null = null;
-      const raw = body.collectionId;
-      if (raw != null && raw !== "" && raw !== false) { const n = typeof raw === "number" ? raw : parseInt(String(raw)); if (!isNaN(n) && n > 0) colId = n; }
-
-      const s = (v: unknown): string | null => v != null && typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
-
-      const [newClip] = await db.insert(clips).values({
-        sourceUrl: cleanUrl, creatorName: s(body.creatorName), creatorHandle: s(body.creatorHandle),
-        previewImage: s(body.previewImage), customTitle: s(body.customTitle), note: s(body.note),
-        saveReason: s(body.saveReason), collectionId: colId,
-      }).returning();
-
-      const tagIds = body.tagIds;
-      if (tagIds && Array.isArray(tagIds) && tagIds.length > 0) {
-        const valid = tagIds.map((id: unknown) => Number(id)).filter((n: number) => !isNaN(n) && n > 0);
-        if (valid.length > 0) await db.insert(clipTags).values(valid.map((tagId: number) => ({ clipId: newClip.id, tagId })));
-      }
-      return NextResponse.json({ clip: newClip }, { status: 201 });
-    });
-  } catch (err: unknown) {
-    console.error("POST /api/clips:", err);
-    let detail = "Lỗi không xác định";
-    if (err instanceof Error) {
-      const pgErr = err as Error & { code?: string };
-      detail = pgErr.code ? `[${pgErr.code}] ${err.message}` : err.message;
+    // Use RAW SQL — bypass Drizzle completely for reliability
+    
+    // 1. Check duplicate
+    const existing = await rawQuery<{ id: number }>(
+      "SELECT id FROM clips WHERE source_url = $1 LIMIT 1",
+      [cleanUrl]
+    );
+    if (existing.length > 0) {
+      return NextResponse.json(
+        { error: "duplicate", message: "Clip này đã có trong kho rồi!" },
+        { status: 409 }
+      );
     }
+
+    // 2. Insert clip
+    const inserted = await rawQuery<ClipRow>(
+      `INSERT INTO clips (source_url, creator_name, creator_handle, preview_image, custom_title, note, save_reason, collection_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        cleanUrl,
+        str(body.creatorName),
+        str(body.creatorHandle),
+        str(body.previewImage),
+        str(body.customTitle),
+        str(body.note),
+        str(body.saveReason),
+        colId,
+      ]
+    );
+
+    if (inserted.length === 0) {
+      return NextResponse.json({ error: "Insert thất bại" }, { status: 500 });
+    }
+
+    const newClip = inserted[0];
+
+    // 3. Insert tags
+    const tagIds = body.tagIds;
+    if (tagIds && Array.isArray(tagIds) && tagIds.length > 0) {
+      const valid = tagIds.map((id: unknown) => Number(id)).filter((n: number) => !isNaN(n) && n > 0);
+      for (const tagId of valid) {
+        await rawQuery(
+          "INSERT INTO clip_tags (clip_id, tag_id) VALUES ($1, $2)",
+          [newClip.id, tagId]
+        );
+      }
+    }
+
+    return NextResponse.json({
+      clip: {
+        id: newClip.id,
+        sourceUrl: newClip.source_url,
+        creatorName: newClip.creator_name,
+        creatorHandle: newClip.creator_handle,
+        previewImage: newClip.preview_image,
+        customTitle: newClip.custom_title,
+        note: newClip.note,
+        saveReason: newClip.save_reason,
+        watchStatus: newClip.watch_status,
+        isPinned: newClip.is_pinned,
+        savedAt: newClip.saved_at,
+        lastOpenedAt: newClip.last_opened_at,
+        openCount: newClip.open_count,
+        collectionId: newClip.collection_id,
+      },
+    }, { status: 201 });
+  } catch (err: unknown) {
+    console.error("POST /api/clips raw error:", err);
+    const detail = extractError(err);
     return NextResponse.json({ error: detail }, { status: 500 });
   }
 }

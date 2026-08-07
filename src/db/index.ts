@@ -1,5 +1,5 @@
 import { drizzle, NodePgDatabase } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
+import { Pool, PoolClient } from "pg";
 
 let _pool: Pool | null = null;
 let _db: NodePgDatabase | null = null;
@@ -19,40 +19,71 @@ function makePool(): Pool {
   });
 }
 
+export function getPool(): Pool {
+  if (!_pool) _pool = makePool();
+  return _pool;
+}
+
 export function getDb(): NodePgDatabase {
   if (_db) return _db;
-  _pool = makePool();
-  _db = drizzle(_pool);
+  _db = drizzle(getPool());
   return _db;
 }
 
-// Reset connection if it fails, so next call creates a fresh pool
 export function resetDb(): void {
-  if (_pool) {
-    _pool.end().catch(() => {});
-  }
+  _pool?.end().catch(() => {});
   _pool = null;
   _db = null;
 }
 
-// Execute with auto-retry: if first attempt fails with connection error, reset pool and retry once
-export async function withRetry<T>(fn: (db: NodePgDatabase) => Promise<T>): Promise<T> {
+// Raw query helper — bypasses Drizzle, gives raw pg errors
+export async function rawQuery<T>(
+  text: string,
+  params?: unknown[]
+): Promise<T[]> {
+  const pool = getPool();
+  let client: PoolClient | null = null;
+  try {
+    client = await pool.connect();
+    const result = await client.query(text, params);
+    return result.rows as T[];
+  } finally {
+    client?.release();
+  }
+}
+
+export async function withRetry<T>(
+  fn: (db: NodePgDatabase) => Promise<T>
+): Promise<T> {
   try {
     return await fn(getDb());
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "";
+    const cause = err instanceof Error && err.cause instanceof Error ? err.cause.message : "";
     const isConnErr =
-      msg.includes("ECONNREFUSED") ||
-      msg.includes("Connection terminated") ||
-      msg.includes("connection timeout") ||
-      msg.includes("Cannot read properties of null") ||
-      msg.includes("Client has encountered a connection error");
-
+      msg.includes("ECONNREFUSED") || cause.includes("ECONNREFUSED") ||
+      msg.includes("Connection terminated") || cause.includes("Connection terminated") ||
+      msg.includes("connection timeout") || cause.includes("connection timeout") ||
+      msg.includes("Client has encountered") || cause.includes("Client has encountered");
     if (isConnErr) {
-      // Reset and retry once
       resetDb();
       return await fn(getDb());
     }
     throw err;
   }
+}
+
+// Extract real error message from Drizzle wrapped errors
+export function extractError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  // Drizzle wraps the real error in .cause
+  const cause = err.cause;
+  if (cause instanceof Error) {
+    const pgErr = cause as Error & { code?: string; detail?: string };
+    let msg = pgErr.message;
+    if (pgErr.code) msg = `[${pgErr.code}] ${msg}`;
+    if (pgErr.detail) msg += ` (${pgErr.detail})`;
+    return msg;
+  }
+  return err.message;
 }
